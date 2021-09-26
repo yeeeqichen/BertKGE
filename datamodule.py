@@ -21,17 +21,30 @@ def read_2id_file(file_path):
 
 
 class CollateFn:
-    def __init__(self, device, negative_sample_size):
+    def __init__(self, device, negative_sample_size, purpose='train'):
         self.device = device
         self.negative_sample_size = negative_sample_size
+        self.purpose = purpose
 
-    def collate_fn(self, batch_input):
+    def get_collate_fn(self):
+        if self.purpose == 'train':
+            return self.collate_fn_train
+        elif self.purpose == 'valid':
+            return self.collate_fn_valid
+
+    # todo: Link Prediction
+    def collate_fn_valid(self, batch_input):
+        pass
+
+    def collate_fn_train(self, batch_input):
         attention_masks = []
         position_ids = []
         seq_ids = []
         negative_seq_ids = []
         negative_attention_masks = []
         negative_position_ids = []
+        positive_labels = []
+        negative_labels = []
         for instance in batch_input:
             triplet = instance['positive_triplet']
             head_sample = instance['positive_head_sample']
@@ -42,6 +55,7 @@ class CollateFn:
             neg_seq_ids = []
             neg_attention_masks = []
             neg_position_ids = []
+            neg_label = []
             seq = [CLS] + triplet + [SEP]
             for sample1 in head_sample:
                 seq += sample1
@@ -56,6 +70,7 @@ class CollateFn:
                 neg_seq_ids.append(neg_seq)
                 neg_attention_masks.append([1] * len(neg_seq))
                 neg_position_ids.append(list(range(len(neg_seq))))
+                neg_label.append(0)
             attention_mask = [1] * len(seq)
             position_id = list(range(len(seq)))
             seq_ids.append(seq)
@@ -64,40 +79,70 @@ class CollateFn:
             negative_attention_masks.append(neg_attention_masks)
             position_ids.append(position_id)
             negative_position_ids.append(neg_position_ids)
+            positive_labels.append(1)
+            negative_labels.append(neg_label)
         attention_masks = torch.LongTensor(attention_masks).to(self.device)
         position_ids = torch.LongTensor(position_ids).to(self.device)
         seq_ids = torch.LongTensor(seq_ids).to(self.device)
+        positive_labels = torch.LongTensor(positive_labels).to(self.device)
         negative_seq_ids = torch.LongTensor(negative_seq_ids).to(self.device)
         negative_attention_masks = torch.LongTensor(negative_attention_masks).to(self.device)
         negative_position_ids = torch.LongTensor(negative_position_ids).to(self.device)
+        negative_labels = torch.LongTensor(negative_labels).to(self.device)
         return {
             'positive': {
                 'input_ids': seq_ids,
                 'attention_mask': attention_masks,
-                'position_id': position_ids
+                'position_id': position_ids,
+                'labels': positive_labels
                 },
             'negative': {
                 'input_ids': negative_seq_ids,
                 'attention_mask': negative_attention_masks,
-                'position_id': negative_position_ids
+                'position_id': negative_position_ids,
+                'labels': negative_labels
             }
         }
 
 
 class MyDataset(Dataset):
-    def __init__(self, file_path, neighbor_sample_size=3, negative_sample_size=5):
+    # todo: 增加对链接预测的支持
+    def __init__(self, file_path, neighbor_sample_size=3, negative_sample_size=5, purpose='train'):
         super(MyDataset, self).__init__()
+        self.purpose = purpose
         self.neighbor_sample_size = neighbor_sample_size
         self.negative_sample_size = negative_sample_size
         self.data = self.read_corpus(file_path)[1]
         self.adjacent_matrix_in, self.adjacent_matrix_out = self.construct_adjacent_matrix()
-        self.sample_enhanced_data = self.get_enhanced_data()
+        if self.purpose == 'train':
+            self.sample_enhanced_data = self.get_enhanced_data()
+        elif self.purpose == 'valid':
+            self.link_prediction_data = self.get_link_prediction_data()
+            pass
 
     def __len__(self):
         return len(self.sample_enhanced_data)
 
     def __getitem__(self, item):
-        return self.sample_enhanced_data[item]
+        if self.purpose == 'train':
+            return self.sample_enhanced_data[item]
+        elif self.purpose == 'valid':
+            return self.link_prediction_data[item]
+        else:
+            pass
+
+    def get_link_prediction_data(self):
+        # todo: filter
+        link_prediction_data = []
+        candidate_entities = list(range(ENTITY_CNT))
+        for head, relation, tail in self.data:
+            candidate_info = []
+            for candidate in candidate_entities:
+                head_samples, tail_samples = self.sample_neighbors(head, candidate)
+                candidate_info.append([candidate, head_samples, tail_samples])
+            link_prediction_data.append({'triplet': [head, relation, tail],
+                                         'candidate_info': candidate_info})
+        return link_prediction_data
 
     def sample_neighbors(self, head, tail):
         head_sample = []
@@ -118,7 +163,7 @@ class MyDataset(Dataset):
 
     def get_enhanced_data(self):
         """
-        第一种sample方法：采样两个node周围的节点及其关系
+        sample方法：采样两个node周围的节点及其关系
         :return:
         """
         sample_enhanced_data = []
